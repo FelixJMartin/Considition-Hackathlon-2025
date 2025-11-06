@@ -1,0 +1,8 @@
+How to push:
+
+git add .
+git commit -m"Type your text here"
+git push
+
+
+git pull
