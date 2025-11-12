@@ -9,14 +9,113 @@ base_url = "http://localhost:8080"
 map_name = "Turbohill"
 
 
+def is_charging_station(node):
+    """
+    Returnerar True om noden är en laddstation.
+    """
+    tgt = node.get("target") or {}
+    t = str(tgt.get("Type", "")).replace(" ", "").lower()
+    return t == "chargingstation"
+
+
 def build_node_index(map_obj):
-    """Return: node_by_id dict mapping 'r.c' -> {'posX': x, 'posY': y, ...}"""
-    idx = {}
+    """
+    Bygger två saker:
+      - node_index: dict { nodeId -> node-objekt }
+      - station_ids: set med nodeId som är laddstationer
+    """
+    node_index = {}
+    station_ids = set()
     for n in map_obj.get("nodes", []) or []:
         nid = n.get("id")
-        if nid is not None:
-            idx[str(nid)] = n
-    return idx
+        if nid is None:
+            continue
+        node_index[nid] = n
+        if is_charging_station(n):
+            station_ids.add(nid)
+    return node_index, station_ids
+
+
+def pos_charging_stations(map_obj):
+    """
+    Skriver ut (och returnerar) laddstationers positioner och egenskaper.
+    Returnerar: (station_ids, stations_list)
+    """
+    stations = []
+    for node in map_obj.get("nodes", []) or []:
+        if not is_charging_station(node):
+            continue
+        tgt = node.get("target") or {}
+        stations.append({
+            "nodeId": node.get("id"),
+            "x": node.get("posX"),
+            "y": node.get("posY"),
+            "totalChargers": tgt.get("totalAmountOfChargers"),
+            "availableChargers": tgt.get("amountOfAvailableChargers"),
+            "speedKW": tgt.get("chargeSpeedPerCharger"),
+            "zoneId": node.get("zoneId"),
+        })
+
+    print("\n=== Charging Stations (positions) ===")
+    if not stations:
+        print("(inga laddstationer hittades)")
+    else:
+        print("nodeId | (x,y)  | avail/total | speed[kW] | zone")
+        print("-" * 60)
+        for s in stations:
+            xy = f"({s['x']},{s['y']})"
+            cap = f"{s.get('availableChargers')}/{s.get('totalChargers')}"
+            print(
+                f"{s['nodeId']:>4}   | {xy:<7} | {cap:<11} | {s.get('speedKW')}      | {s.get('zoneId')}")
+
+    station_ids = {s["nodeId"] for s in stations}
+    return station_ids, stations
+
+
+def at_or_heading_to_station(customer_entry, station_ids):
+    """
+    Tar en kund-dict (som din customer_info() returnerar) och ett set station_ids.
+    Returnerar tuple (status, station_nodeId):
+      - ('at', station_id)      om kunden står på en station
+      - ('heading', station_id) om kundens edge slutar i en station (är på väg dit)
+      - (None, None)            annars
+    """
+    node = customer_entry.get("node")
+    if node in station_ids:
+        return "at", node
+
+    edge = customer_entry.get("edge")
+    if isinstance(edge, str) and "-->" in edge:
+        try:
+            a, b = edge.split("-->")
+            dest = b.strip()
+            if dest in station_ids:
+                return "heading", dest
+        except Exception:
+            pass
+
+    return None, None
+
+
+def print_customers_at_or_heading(customers_list, station_ids):
+    """
+    Skriver ut vilka kunder som är vid eller på väg till en station i aktuell tick.
+    customers_list = listan som returneras från customer_info(...)
+    """
+    hits = []
+    for c in customers_list:
+        status, sid = at_or_heading_to_station(c, station_ids)
+        if status:
+            hits.append((c.get("id"), status, sid, c.get(
+                "state"), c.get("chargeRemaining")))
+    print("\n--- Customers at / heading to charging stations ---")
+    if not hits:
+        print("(inga kunder vid/på väg till stationer i denna tick)")
+    else:
+        for cid, status, sid, state, soc in hits:
+            stat_txt = "AT" if status == "at" else "HEADING→"
+            print(
+                f"Customer {cid} {stat_txt} station {sid} | state={state} | SoC={soc}")
 
 
 def customer_info_from_response(game_response, current_tick, node_index):
@@ -116,7 +215,7 @@ def main():
 
     client = ConsiditionClient(base_url, api_key)
 
-    # 1) Fetch static map (layout) and build node index
+    # 1) Fetch static map and build indices
     try:
         map_obj = client.get_map(map_name)
     except Exception as e:
@@ -127,23 +226,25 @@ def main():
         print("Failed to fetch map!")
         sys.exit(1)
 
-    node_index = build_node_index(map_obj)  # <-- after map_obj exists
+    node_index, station_ids = build_node_index(map_obj)
+    pos_charging_stations(map_obj)  # visa stationerna en gång i början
 
     # 2) Init game state
-    final_score = 0
+    final_score = 0.0
     good_ticks = []
 
-    current_tick = generate_tick(map_obj, 0)
+    current_tick = generate_tick(map_obj, 0)  # tomma rekommendationer
     input_payload = {
         "mapName": map_name,
         "ticks": [current_tick],
     }
 
-    total_ticks = int(map_obj.get("ticks", 0))
-    max_ticks = 10
+    total_ticks = int(map_obj.get("ticks", 0)) or 0
+    max_ticks = 50
 
-    # 3) Play and inspect ticks
-    for i in range(min(total_ticks, max_ticks)):
+    # 3) Play up to max_ticks
+    # for i in range(min(total_ticks, max_ticks)):
+    for i in range(max_ticks):
         print(f"Playing tick: {i}")
         start = time.perf_counter()
         try:
@@ -151,23 +252,38 @@ def main():
         except Exception as e:
             print(f"Error posting game data: {e}")
             sys.exit(1)
-        elapsed_ms = (time.perf_counter() - start) * 1000
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
         print(f"Tick {i} took: {elapsed_ms:.2f}ms")
 
-        if not game_response:
-            print("Got no game response")
+        if not isinstance(game_response, dict):
+            print("Got no/invalid game response")
             sys.exit(1)
 
-        # Score snapshot
-        final_score = game_response.get("score", 0) or 0
+        # 4) Score snapshot (lite mer informativt)
+        kwh = float(game_response.get("kwhRevenue", 0) or 0)
+        ccs = float(game_response.get("customerCompletionScore", 0) or 0)
+        scr = float(game_response.get("score", 0) or 0)
+        final_score = scr  # spelets total score, men vi visar komponenterna också
+        print(
+            f"Score snapshot → kWh:{kwh:.2f}  CCS:{ccs:.2f}  score:{scr:.2f}  total:{(kwh+ccs+scr):.2f}")
 
-        # 4) Print dynamic per-tick customer info from customerLogs
-        customer_info_from_response(game_response, i, node_index)
+        # 5) Skriv kundinfo *från* response (customerLogs)
+        customers_this_tick = customer_info_from_response(
+            game_response, i, node_index)
 
-        # 5) Advance to next tick
+        # Extra: vilka är vid/på väg till station?
+        print_customers_at_or_heading(customers_this_tick, station_ids)
+
+        # 6) Advance to next tick
         if should_move_on_to_next_tick(game_response):
-            good_ticks.append(current_tick)  # keep the tick we just played
-            updated_map = game_response.get("map", map_obj) or map_obj  # usually unchanged, but safe
+            good_ticks.append(current_tick)  # behåll tick vi nyss spelat
+
+            # Om kartan skickas tillbaka (typ samma layout), ta den, annars behåll original
+            updated_map = game_response.get("map", map_obj) or map_obj
+
+            # (Valfritt) bygg om index om du vill vara helt säker:
+            # node_index, station_ids = build_node_index(updated_map)
+
             current_tick = generate_tick(updated_map, i + 1)
             input_payload = {
                 "mapName": map_name,
@@ -175,12 +291,10 @@ def main():
                 "ticks": [*good_ticks, current_tick],
             }
         else:
-            # If you ever implement validation/feedback, handle it here.
-            # For now, just stop to avoid looping on the same tick.
+            print("Engine suggested to hold/stop on this tick; breaking.")
             break
 
     print(f"Final score: {final_score}")
-
 
 
 if __name__ == "__main__":
