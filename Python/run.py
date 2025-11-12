@@ -1,476 +1,335 @@
-
-# import sys
-# import time
-# from client import ConsiditionClient
-
-# from collections import deque
-
-
-# api_key = "e32ec928-ac93-466b-8cd5-ac151ef5f7fe"
-# base_url = "http://localhost:8080/api"
-# map_name = "Turbohill"
-
-
-# def list_charging_stations_full(map_obj, game_response=None):
-#     zone_logs = (game_response or {}).get("zoneLogs", [])
-#     latest_zlog = max(zone_logs, key=lambda e: e.get(
-#         "tick", -1)) if zone_logs else None
-#     zones = {z["zoneId"]: z for z in latest_zlog["zones"]
-#              } if latest_zlog else {}
-
-#     stations = []
-#     for node in map_obj.get("nodes", []):
-#         tgt = node.get("target") or {}
-#         if str(tgt.get("Type", "")).replace(" ", "").lower() == "chargingstation":
-#             zone_id = node.get("zoneId") or tgt.get("zoneId")
-#             zone_data = zones.get(zone_id, {})
-#             src_info = zone_data.get("sourceinfo", {})
-#             green_total = sum(v.get("production", 0)
-#                               for v in src_info.values() if v.get("isGreen"))
-#             total_prod = sum(v.get("production", 0) for v in src_info.values())
-#             green_share = round(green_total / total_prod,
-#                                 3) if total_prod > 0 else None
-
-#             stations.append({
-#                 "nodeId": node.get("id"),
-#                 "x": node.get("posX"),
-#                 "y": node.get("posY"),
-#                 "zoneId": zone_id,
-#                 "isGreenStation": tgt.get("isGreen", False),
-#                 "totalChargers": tgt.get("totalAmountOfChargers", 0),
-#                 "availableChargers": tgt.get("amountOfAvailableChargers", 0),
-#                 "brokenChargers": tgt.get("totalAmountOfBrokenChargers", 0),
-#                 "chargeSpeedKW": tgt.get("chargeSpeedPerCharger", 0),
-#                 "chargePrice": tgt.get("chargePrice", None),
-#                 "zoneGreenShare": green_share,
-#                 "zonePricePerMWh": zone_data.get("pricePerMWh"),
-#                 "zoneSupplyRatio": zone_data.get("suppliedDemandRatio"),
-#                 "weather": zone_data.get("weather"),
-#             })
-#     return stations
-
-
-# def print_charging_stations(map_obj, sort_by="nodeId", limit=None):
-#     "<---- lets just make a prettier more readable version to visuaise the chargers --->"
-#     data = get_charging_stations(map_obj)
-#     if not data:
-#         print("No charging stations found.")
-#         return
-
-#     if sort_by in data[0]:
-#         data.sort(key=lambda d: (d.get(sort_by) is None, d.get(sort_by)))
-
-#     if isinstance(limit, int) and limit > 0:
-#         data = data[:limit]
-
-#     header = [
-#         "nodeId", "(x,y)", "avail/total", "broken", "speed[kW]", "green", "zone"
-#     ]
-#     print(" | ".join(header))
-#     print("-" * 80)
-
-#     for s in data:
-#         xy = f"({s.get('x')},{s.get('y')})"
-#         cap = f"{s.get('availableChargers')}/{s.get('totalChargers')}"
-#         row = [
-#             str(s.get("nodeId")),
-#             xy,
-#             cap,
-#             str(s.get("brokenChargers")),
-#             str(s.get("chargeSpeedKW")),
-#             str(bool(s.get("isGreen"))),
-#             str(s.get("zoneId")),
-#         ]
-#         print(" | ".join(row))
-
-
-# # client = ConsiditionClient(base_url, api_key)
-# # map_obj = client.get_map(map_name)
-
-# # # stations = get_charging_stations(map_obj)
-
-# # # # print(stations)
-# # # print_charging_stations(map_obj)
-
-
-# # stations = list_charging_stations_full(map_obj)
-# # for s in stations:
-# #     print(f"Station {s['nodeId']} @ ({s['x']},{s['y']}) | "
-# #           f"Avail: {s['availableChargers']}/{s['totalChargers']} | "
-# #           f"Speed: {s['chargeSpeedKW']}kW | GreenStation: {s['isGreenStation']} | "
-# #           f"Zone {s['zoneId']} → GreenShare: {s['zoneGreenShare']} | "
-# #           f"Price: {s['zonePricePerMWh']} | Supply: {s['zoneSupplyRatio']}")
-
-
-# "<------------------------>"
-
-
-# def list_customers(map_obj):
-#     out = []
-#     for n in map_obj.get("nodes", []):
-#         for c in n.get("customers", []) or []:
-#             cc = dict(c)
-#             cc["_nodeId"] = n.get("id")
-#             out.append(cc)
-#     return out
-
-
-# def is_charging_station(node):
-#     """Return True if the node is a charging station (covers minor naming variants)."""
-#     tgt = node.get("target") or {}
-#     t = str(tgt.get("Type", "")).replace(" ", "").lower()
-#     return t == "chargingstation"
-
-
-# def build_node_index(map_obj):
-#     """Return {nodeId: node}, and a set of station nodeIds."""
-#     idx = {}
-#     stations = set()
-#     for n in map_obj.get("nodes", []) or []:
-#         nid = n.get("id")
-#         if nid is not None:
-#             idx[nid] = n
-#             if is_charging_station(n):
-#                 stations.add(nid)
-#     return idx, stations
-
-
-# def customers_needing_charge(customers, soc_low=0.25):
-#     """
-#     Return customers that look risky (low SoC) or standing at a charger with sub-80% SoC.
-#     This is intentionally simple to earn quick 'charged at least once' points.
-#     """
-#     need = []
-#     for c in customers:
-#         soc = c.get("chargeRemaining")
-#         try:
-#             soc = float(soc)
-#         except Exception:
-#             continue
-#         if soc is None:
-#             continue
-#         # Low battery OR “at a charger and not yet pretty full”
-#         if soc < soc_low or soc < 0.80:
-#             need.append(c)
-#     return need
-
-
-# def neighbors_of(node_id, map_obj):
-#     """
-#     Return neighbor nodeIds of node_id from the map's edges.
-#     Tries common key names; falls back gracefully if unknown.
-#     """
-#     nbrs = set()
-#     for e in map_obj.get("edges", []) or []:
-#         # Try common shapes:
-#         a = e.get("from") or e.get(
-#             "fromNodeId") or e.get("a") or e.get("start")
-#         b = e.get("to") or e.get("toNodeId") or e.get("b") or e.get("end")
-#         if a is None or b is None:
-#             continue
-#         if a == node_id:
-#             nbrs.add(b)
-#         elif b == node_id:
-#             nbrs.add(a)
-#     return list(nbrs)
-
-
-# def pick_station_for_customer(c, node_index, station_ids, map_obj):
-#     """
-#     Return (where_to_go_nodeId, where_to_charge_nodeId) for customer c.
-#     - If standing on a station: (current_node, current_node)
-#     - Else if an adjacent node is a station: (that_station, that_station)
-#     - Else: (None, None) → skip for now (keeps it simple and safe)
-#     """
-#     here = c.get("_nodeId")
-#     if here in station_ids:
-#         return here, here
-
-#     for nb in neighbors_of(here, map_obj):
-#         if nb in station_ids:
-#             return nb, nb
-
-#     return None, None
-
-
-# "<------------------------>"
-
-
-# def neighbors_of(node_id, map_obj):
-#     nbrs = set()
-#     for e in map_obj.get("edges", []) or []:
-#         a = e.get("from") or e.get(
-#             "fromNodeId") or e.get("a") or e.get("start")
-#         b = e.get("to") or e.get("toNodeId") or e.get("b") or e.get("end")
-#         if a is None or b is None:
-#             continue
-#         if a == node_id:
-#             nbrs.add(b)
-#         elif b == node_id:
-#             nbrs.add(a)
-#     return list(nbrs)
-
-
-# def shortest_path_within_hops(start_id, goal_set, map_obj, max_hops=2):
-#     """Return the path (list of nodeIds) from start to the nearest station within max_hops, else []"""
-#     if start_id in goal_set:
-#         return [start_id]
-#     q = deque([(start_id, [start_id])])
-#     seen = {start_id}
-#     while q:
-#         node, path = q.popleft()
-#         if len(path) - 1 >= max_hops:
-#             continue
-#         for nb in neighbors_of(node, map_obj):
-#             if nb in seen:
-#                 continue
-#             new_path = path + [nb]
-#             if nb in goal_set:
-#                 return new_path
-#             seen.add(nb)
-#             q.append((nb, new_path))
-#     return []
-
-
-# "<------------------------>"
-# "<---------- Recommendations that we can give  ------------->"
-
-
-# def make_charge_rec(customer_id, node_id, minutes=10):
-#     return {
-#         "customerId": customer_id,
-#         "action": "Charge",        # try this
-#         "nodeId": node_id,         # if engine expects 'atNodeId', add it too
-#         "atNodeId": node_id,       # hedge
-#         "minutes": minutes,        # small top-up to “charged at least once”
-#     }
-
-
-# def make_move_rec(customer_id, to_node_id):
-#     return {
-#         "customerId": customer_id,
-#         "action": "Move",          # sometimes engines want 'MoveToNode'
-#         "toNodeId": to_node_id,
-#         "toNode": to_node_id,      # hedge
-#     }
-
-
-# "<------------------------>"
-
-
-# def should_move_on_to_next_tick(response):
-#     return True
-
-
-# def generate_customer_recommendations(map_obj, current_tick):
-#     customers = list_customers(map_obj)
-#     node_index, station_ids = build_node_index(map_obj)
-
-#     recs = []
-#     for c in customers:
-#         cid = c.get("id")
-#         if cid is None:
-#             continue
-#         here = c.get("_nodeId")
-#         soc = c.get("chargeRemaining")
-#         try:
-#             soc = float(soc)
-#         except Exception:
-#             soc = None
-
-#         # 1) If on a station and not ~full → charge briefly
-#         if here in station_ids and (soc is None or soc < 0.90):
-#             recs.append(make_charge_rec(cid, here, minutes=10))
-#             continue
-
-#         # 2) If lowish SoC, try to get to a station within 2 hops
-#         if soc is not None and soc < 0.45:
-#             path = shortest_path_within_hops(
-#                 here, station_ids, map_obj, max_hops=2)
-#             if path and len(path) >= 2:
-#                 next_hop = path[1]
-#                 recs.append(make_move_rec(cid, next_hop))
-#                 # don't queue charge yet; we'll issue it when they stand on the station in a later tick
-#                 continue
-
-#         # 3) Light-touch: if medium SoC and an adjacent station exists, hop there and charge
-#         if soc is not None and 0.45 <= soc < 0.75:
-#             nbs = neighbors_of(here, map_obj)
-#             adj_station = next((nb for nb in nbs if nb in station_ids), None)
-#             if adj_station is not None:
-#                 recs.append(make_move_rec(cid, adj_station))
-#                 # also request a short charge now (some engines accept same-tick plan)
-#                 recs.append(make_charge_rec(cid, adj_station, minutes=10))
-#                 continue
-
-#     return recs
-
-
-# def generate_tick(map_obj, current_tick):
-#     return {
-#         "tick": current_tick,
-#         "customerRecommendations": generate_customer_recommendations(map_obj, current_tick),
-#     }
-
-
-# def main():
-#     api_key = "e32ec928-ac93-466b-8cd5-ac151ef5f7fe"
-#     base_url = "http://localhost:8080/api"
-#     map_name = "Turbohill"
-
-#     client = ConsiditionClient(base_url, api_key)
-
-#     try:
-#         map_obj = client.get_map(map_name)
-#     except Exception as e:
-#         print(f"Failed to fetch map: {e}")
-#         sys.exit(1)
-
-#     if not map_obj:
-#         print("Failed to fetch map!")
-#         sys.exit(1)
-
-#     final_score = 0
-#     good_ticks = []
-
-#     current_tick = generate_tick(map_obj, 0)
-#     input_payload = {
-#         "mapName": map_name,
-#         "ticks": [current_tick],
-#     }
-
-#     total_ticks = int(map_obj.get("ticks", 0))
-
-#     for i in range(total_ticks):
-#         while True:
-#             print(f"Playing tick: {i}")
-#             start = time.perf_counter()
-#             try:
-#                 game_response = client.post_game(input_payload)
-#             except Exception as e:
-#                 print(f"Error posting game data: {e}")
-#                 sys.exit(1)
-#             elapsed_ms = (time.perf_counter() - start) * 1000
-#             print(f"Tick {i} took: {elapsed_ms:.2f}ms")
-
-#             if not game_response:
-#                 print("Got no game response")
-#                 sys.exit(1)
-
-#             # right after you receive game_response
-#             if isinstance(game_response, dict):
-#                 if game_response.get("errors"):
-#                     print("ERRORS:", game_response["errors"])
-#                 if game_response.get("validationMessage"):
-#                     print("VALIDATION:", game_response["validationMessage"])
-#                 if game_response.get("customerLogs"):
-#                     print("customerLogs (first 8):")
-#                     for line in game_response["customerLogs"][:8]:
-#                         print("-", line)
-
-#             # Sum the scores directly (assuming they are numbers)
-#             # final_score = game_response.get("score", 0)
-#             # Peek scores
-#             kwh = float(game_response.get(
-#                 "kwhRevenue", game_response.get("kwchRevenue", 0)) or 0)
-#             ccs = float(game_response.get("customerCompletionScore", 0) or 0)
-#             scr = float(game_response.get("score", 0) or 0)
-#             final_score = kwh + ccs + scr
-#             print(
-#                 f"Score snapshot → kWh:{kwh:.2f}  CCS:{ccs:.2f}  score:{scr:.2f}  total:{final_score:.2f}")
-
-#             if should_move_on_to_next_tick(game_response):
-#                 good_ticks.append(current_tick)
-#                 updated_map = game_response.get("map", map_obj) or map_obj
-#                 current_tick = generate_tick(updated_map, i + 1)
-#                 input_payload = {
-#                     "mapName": map_name,
-#                     "playToTick": i + 1,
-#                     "ticks": [*good_ticks, current_tick],
-#                 }
-#                 break
-
-#             updated_map = game_response.get("map", map_obj) or map_obj
-#             current_tick = generate_tick(updated_map, i)
-#             input_payload = {
-#                 "mapName": map_name,
-#                 "playToTick": i,
-#                 "ticks": [*good_ticks, current_tick],
-#             }
-
-#     print(f"Final score: {final_score}")
-
-
-# if __name__ == "__main__":
-#     main()
-
-
-import os
+import sys
 import time
-from dotenv import load_dotenv
-from client import get_map, post_game
-from policy import generate_tick, should_move_on_to_next_tick
+import json
+from client import ConsiditionClient
 
-load_dotenv()
-MAP_NAME = os.getenv("MAP_NAME", "TRAINING_MAP_1")
+api_key = "e32ec928-ac93-466b-8cd5-ac151ef5f7fe"
+base_url = "http://localhost:8080"
+map_name = "Turbohill"
+
+
+def is_charging_station(node):
+    """
+    Returnerar True om noden är en laddstation.
+    """
+    tgt = node.get("target") or {}
+    t = str(tgt.get("Type", "")).replace(" ", "").lower()
+    return t == "chargingstation"
+
+
+def build_node_index(map_obj):
+    """
+    Bygger två saker:
+      - node_index: dict { nodeId -> node-objekt }
+      - station_ids: set med nodeId som är laddstationer
+    """
+    node_index = {}
+    station_ids = set()
+    for n in map_obj.get("nodes", []) or []:
+        nid = n.get("id")
+        if nid is None:
+            continue
+        node_index[nid] = n
+        if is_charging_station(n):
+            station_ids.add(nid)
+    return node_index, station_ids
+
+
+def pos_charging_stations(map_obj):
+    """
+    Skriver ut (och returnerar) laddstationers positioner och egenskaper.
+    Returnerar: (station_ids, stations_list)
+    """
+    stations = []
+    for node in map_obj.get("nodes", []) or []:
+        if not is_charging_station(node):
+            continue
+        tgt = node.get("target") or {}
+        stations.append({
+            "nodeId": node.get("id"),
+            "x": node.get("posX"),
+            "y": node.get("posY"),
+            "totalChargers": tgt.get("totalAmountOfChargers"),
+            "availableChargers": tgt.get("amountOfAvailableChargers"),
+            "speedKW": tgt.get("chargeSpeedPerCharger"),
+            "zoneId": node.get("zoneId"),
+        })
+
+    print("\n=== Charging Stations (positions) ===")
+    if not stations:
+        print("(inga laddstationer hittades)")
+    else:
+        print("nodeId | (x,y)  | avail/total | speed[kW] | zone")
+        print("-" * 60)
+        for s in stations:
+            xy = f"({s['x']},{s['y']})"
+            cap = f"{s.get('availableChargers')}/{s.get('totalChargers')}"
+            print(
+                f"{s['nodeId']:>4}   | {xy:<7} | {cap:<11} | {s.get('speedKW')}      | {s.get('zoneId')}")
+
+    station_ids = {s["nodeId"] for s in stations}
+    return station_ids, stations
+
+
+def customer_info_from_response(game_response, current_tick, node_index):
+    """
+    Print dynamic customer info for a given tick using customerLogs from the game response.
+    Falls back to node coordinates if posX/posY are missing.
+    """
+
+    def fmt_float(v, places=3):
+        if v is None:
+            return "N/A"
+        try:
+            return f"{float(v):.{places}f}"
+        except Exception:
+            return str(v)
+
+    def or_na(v):
+        return "N/A" if v is None else v
+
+    logs = game_response.get("customerLogs", []) or []
+    customers = []
+
+    for entry in logs:
+        cid = entry.get("customerId") or entry.get("id")
+        # pick the latest snapshot ≤ current_tick
+        best = None
+        for rec in entry.get("logs", []) or []:
+            t = rec.get("tick")
+            if t is None:
+                continue
+            if t <= current_tick and (best is None or t > best.get("tick", -1)):
+                best = rec
+        if best is None:
+            continue
+
+        # Determine coordinates
+        px = best.get("posX")
+        py = best.get("posY")
+        node_id = best.get("node")
+        edge_id = best.get("edge")  # e.g. "1.2-->1.3" while traveling
+
+        if (px is None or py is None) and node_id:
+            n = node_index.get(str(node_id))
+            if n:
+                px = n.get("posX", px)
+                py = n.get("posY", py)
+
+        info = {
+            "tick": current_tick,
+            "id": cid,
+            "mood": best.get("mood"),
+            "state": best.get("state"),
+            "chargeRemaining": best.get("chargeRemaining"),
+            "ticksSpentCharging": best.get("ticksSpentCharging"),
+            "ticksSpentWaiting": best.get("ticksSpentWaiting"),
+            "posX": px,
+            "posY": py,
+            "node": node_id,
+            "edge": edge_id,
+        }
+        customers.append(info)
+
+    print(f"\n=== Customer Info @ Tick {current_tick} ===")
+    if not customers:
+        print("(no customer logs for this tick)")
+        return customers
+
+    for c in customers:
+        print(
+            f"ID {or_na(c['id']):>5} | Mood: {or_na(c['mood']):<8} | "
+            f"SoC: {fmt_float(c['chargeRemaining'])} | "
+            f"State: {or_na(c['state']):<18} | Node: {or_na(c['node']):<4} | "
+            f"Edge: {or_na(c['edge']):<12} | Pos: ({or_na(c['posX'])},{or_na(c['posY'])})"
+        )
+    return customers
+
+
+# ---------- Strict station logic & arriving-next-tick look-ahead ----------
+
+def is_at_station_strict(c, station_ids):
+    """
+    True only if the customer is exactly AT a station node this tick (not already moving away).
+    States that are OK to start charging: Waiting, Idle, Home, TransitioningToNode, Charging.
+    We EXCLUDE TransitioningToEdge (leaving the node) and Traveling.
+    """
+    node = c.get("node")
+    edge = (c.get("edge") or "").strip()
+    state = (c.get("state") or "").strip()
+    if node not in station_ids:
+        return False
+    if edge and edge != "N/A":
+        return False
+    return state in {"Charging", "Waiting", "Idle", "Home", "TransitioningToNode"}
+
+
+def empty_tick(t):
+    return {"tick": t, "customerRecommendations": []}
+
+
+def arriving_next_tick_is_station(c, station_ids):
+    """
+    If edge is 'A-->B' and B ∈ station_ids, return B; else None.
+    """
+    edge = (c.get("edge") or "").strip()
+    if "-->" not in edge:
+        return None
+    try:
+        _, b = edge.split("-->")
+        dest = b.strip()
+        return dest if dest in station_ids else None
+    except Exception:
+        return None
+
+
+def print_customers_at_or_heading(customers_list, station_ids):
+    """
+    Debug print: customers strictly AT a station or ARRIVING→ a station next tick.
+    """
+    hits = []
+    for c in customers_list:
+        if is_at_station_strict(c, station_ids):
+            hits.append((c.get("id"), "AT", c.get("node"),
+                        c.get("state"), c.get("chargeRemaining")))
+        else:
+            dest = arriving_next_tick_is_station(c, station_ids)
+            if dest:
+                hits.append((c.get("id"), "ARRIVING→", dest,
+                            c.get("state"), c.get("chargeRemaining")))
+    print("\n--- Customers at / heading to charging stations ---")
+    if not hits:
+        print("(inga kunder vid/på väg till stationer i denna tick)")
+    else:
+        for cid, status, sid, state, soc in hits:
+            print(
+                f"Customer {cid} {status} station {sid} | state={state} | SoC={soc}")
+
+
+# ---------- Recommendation builder (now from current logs) ----------
+
+def generate_customer_recommendations(customers_this_tick, station_ids, soc_full=0.99):
+    """
+    Build ONE actionable recommendation per customer for THIS/NEXT immediate station only:
+      A) If strictly AT a station and not full -> charge here to 1.0
+      B) Else if arriving next tick at a station and not full -> charge there to 1.0
+    """
+    recs = []
+    for c in customers_this_tick:
+        soc = float(c.get("chargeRemaining") or 0.0)
+
+        # A) already AT a station
+        if is_at_station_strict(c, station_ids) and soc < soc_full:
+            recs.append({
+                "customerId": str(c["id"]),
+                "chargingRecommendations": [{
+                    "nodeId": str(c["node"]),
+                    "chargeTo": 1.0
+                }]
+            })
+            continue
+
+        # B) arriving next tick to a station
+        dest_station = arriving_next_tick_is_station(c, station_ids)
+        if dest_station and soc < soc_full:
+            recs.append({
+                "customerId": str(c["id"]),
+                "chargingRecommendations": [{
+                    "nodeId": str(dest_station),
+                    "chargeTo": 1.0
+                }]
+            })
+
+    return recs
+
+
+def generate_tick(tick_no, recommendations):
+    """
+    Build the tick object using camelCase schema.
+    """
+    return {
+        "tick": tick_no,
+        "customerRecommendations": recommendations,
+    }
+
+
+def should_move_on_to_next_tick(_response):
+    return True
 
 
 def main():
-    map_state = get_map(MAP_NAME)
-    if not map_state:
+    client = ConsiditionClient(base_url, api_key)
+
+    # 1) Fetch map, build indices
+    try:
+        map_obj = client.get_map(map_name)
+    except Exception as e:
+        print(f"Failed to fetch map: {e}")
+        sys.exit(1)
+    if not map_obj:
         print("Failed to fetch map!")
-        raise SystemExit(1)
+        sys.exit(1)
 
-    final_score = 0
-    good_ticks = []
+    node_index, station_ids = build_node_index(map_obj)
+    pos_charging_stations(map_obj)
 
-    current_tick = generate_tick(map_state, 0)
-    input_payload = {
-        "mapName": MAP_NAME,
-        "ticks": [current_tick],
-    }
+    # 2) Start with an empty tick 0 (we will fill it AFTER the first simulate step)
+    good_ticks = [empty_tick(0)]
+    input_payload = {"mapName": map_name, "ticks": good_ticks[:]}
 
-    total_ticks = int(map_state.get("ticks", 0))
-    for i in range(total_ticks):
-        while True:
-            print(
-                f"Playing tick: {i} with input keys: {list(input_payload.keys())}")
-            t0 = time.perf_counter()
-            game_response = post_game(input_payload)
-            dt = (time.perf_counter() - t0) * 1000
-            print(f"Tick {i} took: {dt:.2f} ms")
+    total_ticks = int(map_obj.get("ticks", 0) or 0)
+    max_ticks = 20
+    final_score = 0.0
 
-            if not game_response:
-                print("Got no game response")
-                raise SystemExit(1)
+    for i in range(max_ticks):
+        print(f"Playing tick: {i}")
+        t0 = time.perf_counter()
+        try:
+            game_response = client.post_game(input_payload)
+        except Exception as e:
+            print(f"Error posting game data: {e}")
+            sys.exit(1)
+        print(f"Tick {i} took: {(time.perf_counter()-t0)*1000:.2f}ms")
 
-            # Mirror JS scoring aggregation
-            final_score = (
-                game_response.get("customerCompletionScore", 0)
-                + game_response.get("kwhRevenue", 0)
-                + game_response.get("score", 0)
-            )
+        # Scores (snapshot)
+        kwh = float(game_response.get("kwhRevenue", 0) or 0)
+        ccs = float(game_response.get("customerCompletionScore", 0) or 0)
+        scr = float(game_response.get("score", 0) or 0)
+        final_score = scr
+        print(
+            f"Score snapshot → kWh:{kwh:.2f}  CCS:{ccs:.2f}  score:{scr:.2f}  total:{(kwh+ccs+scr):.2f}")
 
-            if should_move_on_to_next_tick(game_response):
-                good_ticks.append(current_tick)
-                # The JS code builds the next tick from the response.map
-                next_map = game_response.get("map", map_state)
-                current_tick = generate_tick(next_map, i + 1)
-                input_payload = {
-                    "mapName": MAP_NAME,
-                    "playToTick": i + 1,
-                    "ticks": [*good_ticks, current_tick],
-                }
-                break
-            else:
-                # Retry same tick with updated map state
-                next_map = game_response.get("map", map_state)
-                current_tick = generate_tick(next_map, i)
-                input_payload = {
-                    "mapName": MAP_NAME,
-                    "playToTick": i,
-                    "ticks": [*good_ticks, current_tick],
-                }
+        # Logs at tick i
+        customers_this_tick = customer_info_from_response(
+            game_response, i, node_index)
+        print_customers_at_or_heading(customers_this_tick, station_ids)
+
+        # Rebuild indices from returned map (late/bonus drivers etc.)
+        updated_map = game_response.get("map", map_obj) or map_obj
+        node_index, station_ids = build_node_index(updated_map)
+
+        # === KEY FIX: build recs FOR TICK i (the tick that will be used when simulating i→i+1) ===
+        recs_for_tick_i = generate_customer_recommendations(
+            customers_this_tick, station_ids)
+
+        # Overwrite the LAST tick entry (which is tick i) with these recommendations
+        # (good_ticks[-1]['tick'] should equal i here)
+        good_ticks[-1] = {"tick": i,
+                          "customerRecommendations": recs_for_tick_i}
+
+        if recs_for_tick_i:
+            import json as _json
+            print("→ Applying recommendations for tick", i, ":\n",
+                  _json.dumps(recs_for_tick_i, indent=2))
+
+        # Prepare next call: simulate to i+1 and append an empty placeholder for tick i+1
+        next_tick_no = i + 1
+        good_ticks.append(empty_tick(next_tick_no))
+        input_payload = {
+            "mapName": map_name,
+            "playToTick": next_tick_no,  # simulate i→i+1 using recs from tick i
+            "ticks": good_ticks[:],
+        }
 
     print(f"Final score: {final_score}")
 
