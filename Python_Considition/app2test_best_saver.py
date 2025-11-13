@@ -6,12 +6,12 @@ from client import ConsiditionClient
 # --- GLOBAL CONFIG (not used directly by main) --------------------------------------
 
 api_key = "e32ec928-ac93-466b-8cd5-ac151ef5f7fe"
-base_url = "http://localhost:8080"
-# base_url = "https://api.considition.com"
+# base_url = "http://localhost:8080"
+base_url = "https://api.considition.com/"
 # map_name = "Turbohill"
 # map_name = "Clutchfield"
-# map_name = "Batterytown"
-map_name = "Thunderroad"
+map_name = "Batterytown"
+# map_name = "Thunderroad"
 
 # === Internal cache so the main() you provided works ===
 # Filled in should_move_on_to_next_tick(); consumed in generate_tick()
@@ -661,79 +661,141 @@ def generate_tick(map_obj, tick_no):
     return tick
 
 
-def main():
-    api_key = "e32ec928-ac93-466b-8cd5-ac151ef5f7fe"
-    base_url = "http://localhost:8080"
-    # base_url = "https://api.considition.com/api/"
-    # map_name = "Turbohill"
-    # map_name = "Clutchfield"
-    # map_name = "Batterytown"
-    map_name = "Thunderroad"
+"<------------------------------------------------------------------------------------>"
 
-    client = ConsiditionClient(base_url, api_key)
+
+IS_LOCAL = base_url.startswith("http://localhost")
+
+
+def run_local_and_collect_ticks(map_name: str):
+    """
+    Run the whole game on the LOCAL docker engine using playToTick,
+    while collecting every tick object (with recommendations) in a list.
+
+    Returns:
+        all_ticks:   [tick0, tick1, ..., tickN]
+        final_score: the score from the last local response
+    """
+    local_base_url = "http://localhost:8080"
+    client = ConsiditionClient(local_base_url, api_key)
 
     try:
         map_obj = client.get_map(map_name)
     except Exception as e:
-        print(f"Failed to fetch map: {e}")
+        print(f"Failed to fetch map from local engine: {e}")
         sys.exit(1)
 
     if not map_obj:
-        print("Failed to fetch map!")
+        print("Failed to fetch local map!")
         sys.exit(1)
+
+    total_ticks = int(map_obj.get("ticks", 0))
+    print(f"Local map has {total_ticks} ticks")
 
     final_score = 0
     good_ticks = []
+    all_ticks = []
 
+    # First tick: no logs yet, just an empty recommendation set
     current_tick = generate_tick(map_obj, 0)
+    all_ticks.append(current_tick)
+
     input_payload = {
         "mapName": map_name,
         "ticks": [current_tick],
+        "playToTick": 0,
     }
 
-    total_ticks = int(map_obj.get("ticks", 0))
-
-    max_dev_ticks = 100
-
+    max_dev_ticks = 80
     for i in range(total_ticks):
         while True:
-            print(f"Playing tick: {i}")
+            print(f"[LOCAL] Playing tick: {i}")
             start = time.perf_counter()
             try:
                 game_response = client.post_game(input_payload)
             except Exception as e:
-                print(f"Error posting game data: {e}")
+                print(f"Error posting local game data: {e}")
                 sys.exit(1)
             elapsed_ms = (time.perf_counter() - start) * 1000
-            print(f"Tick {i} took: {elapsed_ms:.2f}ms")
+            print(f"[LOCAL] Tick {i} took: {elapsed_ms:.2f}ms")
 
             if not game_response:
-                print("Got no game response")
+                print("Got no local game response")
                 sys.exit(1)
 
-            # Sum the scores directly (assuming they are numbers)
+            # Local score (for debugging only)
             final_score = game_response.get("score", 0)
 
             if should_move_on_to_next_tick(game_response):
                 good_ticks.append(current_tick)
                 updated_map = game_response.get("map", map_obj) or map_obj
                 current_tick = generate_tick(updated_map, i + 1)
+                all_ticks.append(current_tick)
+
                 input_payload = {
                     "mapName": map_name,
-                    "playToTick": i + 1,
                     "ticks": [*good_ticks, current_tick],
+                    "playToTick": i + 1,
                 }
                 break
 
+            # If we ever decide NOT to move on (you always return True today),
+            # we would update with the same tick index i.
             updated_map = game_response.get("map", map_obj) or map_obj
             current_tick = generate_tick(updated_map, i)
+            all_ticks.append(current_tick)
+
             input_payload = {
                 "mapName": map_name,
-                "playToTick": i,
                 "ticks": [*good_ticks, current_tick],
+                "playToTick": i,
             }
 
-    print(f"Final score: {final_score}")
+    print(f"[LOCAL] Final local dev score: {final_score}")
+    return all_ticks, final_score
+
+
+def submit_ticks_to_cloud(map_name: str, all_ticks):
+    """
+    Submit the full tick sequence in ONE batch to the cloud API.
+    No playToTick here, just the deterministic replay.
+    """
+    cloud_base_url = "https://api.considition.com/"
+    client = ConsiditionClient(cloud_base_url, api_key)
+
+    payload = {
+        "mapName": map_name,
+        "ticks": all_ticks,
+    }
+
+    print(f"[CLOUD] Submitting {len(all_ticks)} ticks in one batch...")
+    start = time.perf_counter()
+    try:
+        game_response = client.post_game(payload)
+    except Exception as e:
+        print(f"Error posting to cloud API: {e}")
+        sys.exit(1)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    print(f"[CLOUD] Submission took: {elapsed_ms:.2f}ms")
+
+    if not game_response:
+        print("[CLOUD] Got no response from cloud")
+        sys.exit(1)
+
+    print("[CLOUD] Response keys:", list(game_response.keys()))
+    cloud_score = game_response.get("score", 0)
+    print(f"[CLOUD] Final cloud score: {cloud_score}")
+    return cloud_score
+
+
+def main():
+
+    # 1) Run locally on docker, using playToTick, and collect all ticks.
+    all_ticks, local_score = run_local_and_collect_ticks(map_name)
+    print(f"Local dev score (for your eyes only): {local_score}")
+
+    # 2) Submit the SAME tick sequence in one batch to the cloud.
+    submit_ticks_to_cloud(map_name, all_ticks)
 
 
 if __name__ == "__main__":

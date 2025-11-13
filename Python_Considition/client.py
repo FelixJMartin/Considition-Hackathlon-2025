@@ -1,5 +1,7 @@
 import requests
 
+"<---- For local ---->"
+
 
 class ConsiditionClient:
     def __init__(self, base_url: str, api_key: str):
@@ -26,3 +28,5 @@ class ConsiditionClient:
                 print(f"Error response status: {e.response.status_code}")
                 print(f"Error response body: {e.response.text}")
             raise
+
+

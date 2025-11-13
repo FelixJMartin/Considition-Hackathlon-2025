@@ -3,60 +3,52 @@ import time
 import json
 from client import ConsiditionClient
 
-# --- GLOBAL CONFIG (not used directly by main) --------------------------------------
+# ============================================================
+# GLOBAL CONFIG
+# ============================================================
 
 api_key = "e32ec928-ac93-466b-8cd5-ac151ef5f7fe"
-base_url = "http://localhost:8080"
-# base_url = "https://api.considition.com"
+# base_url = "http://localhost:8080"
+base_url = "https://api.considition.com/"
 # map_name = "Turbohill"
 # map_name = "Clutchfield"
-# map_name = "Batterytown"
-map_name = "Thunderroad"
+map_name = "Batterytown"
+# map_name = "Thunderroad"
 
-# === Internal cache so the main() you provided works ===
+# --- Internal caches (used across ticks) --------------------
+
 # Filled in should_move_on_to_next_tick(); consumed in generate_tick()
 _PENDING_RECS_FOR_NEXT_TICK = []
 
-# Minimal memory to avoid immediate re-topups
 # customerId -> soc_threshold_to_allow_next_charge (e.g. 0.75)
 _RECENT_CHARGE_UNTIL = {}
 
-# Track if a customer has charged at least once (for completion score)
-# customerId -> bool
+# customerId -> bool (has ever charged)
 _HAS_CHARGED = {}
 
-# Optional: first tick we saw each customer (could be used for extra heuristics)
+# customerId -> first tick ever seen
 _FIRST_SEEN_TICK = {}
 
+# Per-car rolling state: consumption etc.
+# cid -> {
+#   "last_soc": float,
+#   "last_tick": int,
+#   "est_cons_per_tick": float,
+# }
+_CAR_STATE = {}
 
-# --- BASIC MAP/STATION INDEXING -----------------------------------------------------
+# ============================================================
+# BASIC MAP / STATION INDEXING
+# ============================================================
 
 
 def is_charging_station(node: dict) -> bool:
-    """
-    A node is a charging station if its 'target.Type' is 'ChargingStation'
-    (case/space insensitive).
-    """
     tgt = node.get("target") or {}
     t = str(tgt.get("Type", "")).replace(" ", "").lower()
     return t == "chargingstation"
 
 
 def build_node_and_station_indexes(map_obj):
-    """
-    Build quick lookup structures from the map object.
-
-    Returns:
-      node_index:   { nodeId -> node }
-      station_ids:  set(nodeId)
-      station_meta: { nodeId -> {
-            "avail": int,
-            "total": int,
-            "speed": float,
-            "is_green": bool,
-            "zoneId": str | None
-        } }
-    """
     node_index = {}
     station_ids = set()
     station_meta = {}
@@ -75,14 +67,12 @@ def build_node_and_station_indexes(map_obj):
                 "avail": int(tgt.get("amountOfAvailableChargers") or 0),
                 "total": int(tgt.get("totalAmountOfChargers") or 0),
                 "speed": float(tgt.get("chargeSpeedPerCharger") or 0.0),
-                # Static green flag on station
                 "is_green": bool(
                     tgt.get("isGreen")
                     or tgt.get("IsGreen")
                     or tgt.get("green")
                     or False
                 ),
-                # Try to read zone id if present
                 "zoneId": str(n.get("zoneId") or n.get("zone") or "")
                 if (n.get("zoneId") or n.get("zone"))
                 else None,
@@ -90,16 +80,12 @@ def build_node_and_station_indexes(map_obj):
 
     return node_index, station_ids, station_meta
 
-
-# --- CUSTOMER LOG PARSING (current tick snapshot) -----------------------------------
+# ============================================================
+# CUSTOMER LOG PARSING & PER-CAR STATE
+# ============================================================
 
 
 def _update_memory_from_log_entry(cid: str, rec: dict):
-    """
-    Update global memories (_HAS_CHARGED etc.) based on a single log record.
-    If ticksSpentCharging > 0 or state indicates charging, we mark the customer
-    as 'has charged at least once'.
-    """
     state = (rec.get("state") or "").strip()
     t_charge = rec.get("ticksSpentCharging")
     try:
@@ -111,14 +97,49 @@ def _update_memory_from_log_entry(cid: str, rec: dict):
         _HAS_CHARGED[cid] = True
 
 
-def customer_info_from_response(game_response, current_tick, node_index):
+def _update_car_state(cid: str, soc, tick, state):
     """
-    Produce per-customer snapshot at <= current_tick from customerLogs.
+    Maintain a per-car rolling estimate of SoC consumption per tick while driving.
+    This makes the "emergency / low" thresholds adaptive to how fast they burn energy.
+    """
+    if soc is None or tick is None:
+        return
 
-    Also updates:
-      - _HAS_CHARGED (by inspecting charging states)
-      - _FIRST_SEEN_TICK
-    """
+    try:
+        soc = float(soc)
+    except Exception:
+        return
+
+    st = _CAR_STATE.get(cid)
+    # Only update consumption when moving (not Charging / Waiting)
+    moving = state not in {"Charging", "Waiting", "Home"}
+
+    if st is not None and moving:
+        last_soc = st.get("last_soc")
+        last_tick = st.get("last_tick")
+        est_cons = st.get("est_cons_per_tick")
+
+        if last_soc is not None and last_tick is not None and tick > last_tick:
+            dsoc = last_soc - soc
+            dt = tick - last_tick
+            if dt > 0 and dsoc > 1e-4:
+                inst_rate = dsoc / dt
+                if est_cons is None:
+                    est_cons = inst_rate
+                else:
+                    # Exponential moving average
+                    est_cons = 0.7 * est_cons + 0.3 * inst_rate
+                st["est_cons_per_tick"] = est_cons
+
+    if st is None:
+        st = {"last_soc": soc, "last_tick": tick, "est_cons_per_tick": None}
+        _CAR_STATE[cid] = st
+    else:
+        st["last_soc"] = soc
+        st["last_tick"] = tick
+
+
+def customer_info_from_response(game_response, current_tick, node_index):
     logs = game_response.get("customerLogs", []) or []
     customers = []
 
@@ -139,17 +160,17 @@ def customer_info_from_response(game_response, current_tick, node_index):
         if best is None:
             continue
 
-        # Track first-seen tick
         if cid not in _FIRST_SEEN_TICK:
             _FIRST_SEEN_TICK[cid] = current_tick
 
-        # Update charging memory from the chosen record
         _update_memory_from_log_entry(cid, best)
 
         px = best.get("posX")
         py = best.get("posY")
         node_id = best.get("node")
-        edge_id = best.get("edge")  # e.g. "1.2-->1.3"
+        edge_id = best.get("edge")
+        state = (best.get("state") or "").strip()
+        soc = best.get("chargeRemaining")
 
         # Fill in coordinates from node if missing
         if (px is None or py is None) and node_id is not None:
@@ -158,22 +179,25 @@ def customer_info_from_response(game_response, current_tick, node_index):
                 px = n.get("posX", px)
                 py = n.get("posY", py)
 
+        # Update car state (consumption)
+        _update_car_state(cid, soc, current_tick, state)
+
         customers.append({
             "tick": current_tick,
             "id": cid,
             "mood": best.get("mood"),
-            "state": best.get("state"),
-            "chargeRemaining": best.get("chargeRemaining"),
+            "state": state,
+            "chargeRemaining": soc,
             "ticksSpentCharging": best.get("ticksSpentCharging"),
             "ticksSpentWaiting": best.get("ticksSpentWaiting"),
             "posX": px,
             "posY": py,
             "node": str(node_id) if node_id is not None else None,
             "edge": edge_id,
-            "persona": best.get("persona"),  # if available
+            "persona": best.get("persona"),
         })
 
-    # Debug / tuning printout (can be commented out once stable)
+    # Debug: comment out when stable
     def fmt_float(v, p=3):
         try:
             return f"{float(v):.{p}f}"
@@ -191,16 +215,17 @@ def customer_info_from_response(game_response, current_tick, node_index):
             print(
                 f"ID {or_na(c['id']):>5} | Mood: {or_na(c['mood']):<10} | "
                 f"SoC: {fmt_float(c['chargeRemaining'])} | "
-                f"State: {or_na(c['state']):<20} | Node: {or_na(c['node']):<6} | "
+                f"State: {or_na(c['state']):<18} | Node: {or_na(c['node']):<6} | "
                 f"Edge: {or_na(c['edge']):<16} | Persona: {or_na(c['persona'])}"
             )
 
     return customers
 
+# ============================================================
+# LIGHTWEIGHT HELPERS
+# ============================================================
 
-# --- LIGHTWEIGHT DECISION HELPERS ---------------------------------------------------
 
-# States where we consider issuing a charge recommendation if the customer is at a station
 CHARGEABLE_STATES = {
     "Charging",
     "Waiting",
@@ -211,24 +236,17 @@ CHARGEABLE_STATES = {
 
 
 def is_at_station_chargeable(c: dict, station_ids) -> bool:
-    """
-    Customer is at a station and in a state where charging is possible.
-    """
     node = c.get("node")
     edge = (c.get("edge") or "").strip()
     state = (c.get("state") or "").strip()
     if node not in station_ids:
         return False
     if edge and edge != "N/A":
-        # If they’re on an edge, they’re travelling, not at the stall yet
         return False
     return state in CHARGEABLE_STATES
 
 
 def arriving_next_tick_is_station(c: dict, station_ids):
-    """
-    If the current edge ends in a station node, return that nodeId, else None.
-    """
     edge = (c.get("edge") or "").strip()
     if "-->" not in edge:
         return None
@@ -243,119 +261,111 @@ def arriving_next_tick_is_station(c: dict, station_ids):
 def empty_tick(t: int) -> dict:
     return {"tick": t, "customerRecommendations": []}
 
-
-# --- ENVIRONMENT / WEATHER / GREENNESS ---------------------------------------------
+# ============================================================
+# ENVIRONMENT / GREENNESS
+# ============================================================
 
 
 def augment_station_meta_with_environment(game_response, current_tick, station_meta):
-    """
-    Add dynamic environment-related keys to each station's meta:
-      - greenFactor: 0..1, how "green" charging is *right now*
-      - priceFactor: 0..1, higher = more expensive (fallback ~0.5)
-
-    Uses:
-      - Station's own is_green flag.
-      - Time-of-day (solar window 06–18, extra around midday).
-      - Optional global weather fields in game_response["weather"]:
-            cloudCover (0..1), windStrength (0..1)
-    """
     weather = game_response.get("weather") or {}
-    # Try a few possible key spellings
-    cloud = weather.get("cloudCover")
-    if cloud is None:
-        cloud = weather.get("CloudCover")
-    wind = weather.get("windStrength")
-    if wind is None:
-        wind = weather.get("WindStrength")
+    cloud = weather.get("cloudCover", weather.get("CloudCover"))
+    wind = weather.get("windStrength", weather.get("WindStrength"))
 
     try:
         cloud = float(cloud)
     except Exception:
-        cloud = 0.3  # mildly cloudy default
+        cloud = 0.3
     try:
         wind = float(wind)
     except Exception:
-        wind = 0.4  # mildly windy default
+        wind = 0.4
 
-    # Time-of-day from ticks: 1 tick = 5 minutes
+    # 1 tick = 5 min
     minutes = current_tick * 5
     hour = (minutes // 60) % 24
 
-    # Solar window & midday boost as per docs (6–18, extra 10–15)
     in_solar_window = 6 <= hour < 18
     in_midday_peak = 10 <= hour < 15
 
     for sid, meta in station_meta.items():
         is_green = bool(meta.get("is_green"))
-        base = 0.35  # base greenness for generic station
+        base = 0.35
 
-        # Static green station bonus
         if is_green:
-            base += 0.25  # dedicated green infrastructure
+            base += 0.25
 
-        # Time-of-day influence
         if in_solar_window:
             base += 0.15
         if in_midday_peak:
             base += 0.10
 
-        # Weather influence: more wind, less clouds → greener
         base += 0.25 * wind
         base -= 0.20 * cloud
 
-        # Clamp to [0, 1]
         green_factor = max(0.0, min(1.0, base))
-
-        # For now, we don't have reliable per-zone price in the DTO,
-        # so we use a neutral priceFactor and leave hooks to adjust later.
-        price_factor = 0.5
+        price_factor = 0.5  # placeholder hook
 
         meta["greenFactor"] = green_factor
         meta["priceFactor"] = price_factor
 
+# ============================================================
+# RECOMMENDER – MAP-AGNOSTIC, COMPLETION-FOCUSED
+# ============================================================
 
-# --- RECOMMENDER – GREEN-AWARE, QUEUE-AWARE, COMPLETION-FOCUSED --------------------
+
+def _persona_biases(persona: str):
+    """
+    Return small multiplicative/additive tweaks for thresholds/targets.
+    """
+    p = (persona or "").lower()
+    bias = {
+        "target_boost": 0.0,   # + to charge higher
+        "target_cut": 0.0,     # - to cut target a bit
+        "risk_aversion": 1.0,  # >1 means charge earlier
+        "green_weight": 1.0,   # >1 means more green-seeking
+    }
+
+    if "eco" in p:
+        bias["target_boost"] += 0.02
+        bias["green_weight"] += 0.6
+
+    if "cost" in p:
+        bias["target_cut"] += 0.03
+        bias["green_weight"] -= 0.3
+
+    if "stress" in p or "dislikesdriving" in p or "dislikes driving" in p:
+        bias["risk_aversion"] *= 1.3
+        bias["target_boost"] += 0.01
+
+    return bias
+
 
 def generate_customer_recommendations(customers_this_tick, station_ids, station_meta):
     """
-    Heuristic policy heavily biased toward CUSTOMER COMPLETION,
-    while being aware of:
-      - greener times/places to charge
-      - queueing / congestion at stations
-      - personas affecting charge aggressiveness
+    Map-agnostic strategy:
 
-    MAIN SOC THRESHOLDS
-    --------------------
-      EMERGENCY_SOC            = 0.25  → must charge ASAP.
-      LOW_SOC                  = 0.35  → prefer charging if at/arriving to station.
-      PREVENTIVE_AT_STATION    = 0.45  → at station, we like to top up below this
-                                          when conditions are green/low congestion.
-      FIRST_CHARGE_MAX_SOC     = 0.85  → if never charged and SoC ≤ this at station,
-                                          we strongly want first charge.
-
-    Station meta extras:
-      - station_meta[sid]["greenFactor"]  ∈ [0, 1]
-      - station_meta[sid]["priceFactor"]  ∈ [0, 1]
+    - Use per-car consumption estimate to set dynamic emergency/low thresholds.
+    - Guarantee at least one strong first charge for each car.
+    - Avoid re-topups above a per-car cooldown threshold.
+    - Avoid sending non-urgent cars into heavy congestion.
+    - Bias targets by persona and greenFactor.
     """
     recs = []
 
-    # Thresholds
-    EMERGENCY_SOC = 0.25
-    LOW_SOC = 0.35
-    PREVENTIVE_AT_STATION = 0.45
-    FIRST_CHARGE_MAX_SOC = 0.85
-    MAX_TARGET = 0.95
+    # Base thresholds
+    BASE_EMERGENCY_SOC = 0.18
+    BASE_LOW_SOC = 0.30
+    BASE_PREVENTIVE_SOC = 0.48
+    MAX_TARGET = 0.94
 
-    # Charger speed split
     FAST_KW_THRESHOLD = 150.0
 
-    # Base targets (before green/persona tweaks)
     FIRST_FAST_TARGET = 0.90
     FIRST_SLOW_TARGET = 0.86
     NORMAL_FAST_TARGET = 0.84
     NORMAL_SLOW_TARGET = 0.80
 
-    # --- Queue estimation: how many are currently Charging/Waiting per station -----
+    # --- Queue estimation ----------------------------------------------------
     queue_by_station = {}
     for c in customers_this_tick:
         node = c.get("node")
@@ -364,61 +374,26 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
             if state in {"Charging", "Waiting"}:
                 queue_by_station[node] = queue_by_station.get(node, 0) + 1
 
-    def persona_adjustment(persona: str, green_factor: float,
-                           price_factor: float, base_target: float) -> float:
-        """
-        Tiny persona-based and green-based tweaks around the base target.
-        """
-        if not persona:
-            persona = ""
-        p = persona.lower()
-
-        t = base_target
-
-        # Eco-conscious: charge more when it's green
-        if "eco" in p:
-            t += 0.04 * green_factor  # up to +0.04
-
-        # Cost-sensitive: charge slightly less, especially if not very green
-        if "cost" in p:
-            t -= 0.03 * (1.0 - green_factor)  # more reduction when not green
-
-        # Dislikes driving / stressed: keep charges slightly shorter
-        if "stress" in p or "dislikesdriving" in p or "dislikes driving" in p:
-            t -= 0.02
-
-        # We could use price_factor here later if the API exposes it meaningfully.
-        return t
-
-    def choose_target_soc(speed_kw: float,
-                          current_soc: float,
-                          first_charge: bool,
-                          persona: str,
-                          green_factor: float,
-                          price_factor: float) -> float:
-        """
-        Pick a target SoC depending on speed, first charge, persona, and greenness.
-        """
+    def choose_target_soc(speed_kw, soc, first_charge, persona_bias, green_factor):
         if first_charge:
             base = FIRST_FAST_TARGET if speed_kw >= FAST_KW_THRESHOLD else FIRST_SLOW_TARGET
         else:
             base = NORMAL_FAST_TARGET if speed_kw >= FAST_KW_THRESHOLD else NORMAL_SLOW_TARGET
 
-        # Green boosts the base slightly (even for neutral personas)
-        base += 0.06 * (green_factor - 0.5)  # from about -0.03 to +0.03
+        # Prefer higher targets when green
+        base += 0.05 * (green_factor - 0.5)
 
-        base = persona_adjustment(persona, green_factor, price_factor, base)
+        # Persona tweaks
+        base += persona_bias["target_boost"]
+        base -= persona_bias["target_cut"]
 
-        # Ensure we gain at least +12 percentage points if we bother to charge
-        target = max(base, current_soc + 0.12)
+        # Always gain at least 12 percentage points when we decide to charge
+        target = max(base, soc + 0.12)
         return max(0.60, min(MAX_TARGET, target))
 
-    def stagger_target(cid: str, target: float) -> float:
-        """
-        Small deterministic stagger to avoid perfect synchronisation.
-        """
+    def stagger_target(cid, target):
         h = hash(cid) % 7  # 0..6
-        delta = (h - 3) * 0.01  # -0.03 .. +0.03
+        delta = (h - 3) * 0.01
         t = target + delta
         return max(0.60, min(MAX_TARGET, t))
 
@@ -433,10 +408,31 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
             soc = 0.0
 
         persona = c.get("persona") or ""
+        bias = _persona_biases(persona)
+
         has_charged = _HAS_CHARGED.get(cid, False)
         cooldown_soc = float(_RECENT_CHARGE_UNTIL.get(cid, 0.0) or 0.0)
 
-        emergency = soc <= EMERGENCY_SOC
+        car_state = _CAR_STATE.get(cid, {})
+        est_cons = car_state.get("est_cons_per_tick") or 0.0
+
+        # Use consumption estimate to adapt thresholds:
+        # if they burn quickly, behave more risk-averse.
+        # Heuristic: "ticks to empty" ~ soc / cons
+        if est_cons > 1e-5:
+            ticks_to_empty = soc / est_cons
+        else:
+            ticks_to_empty = 999.0
+
+        risk_aversion = bias["risk_aversion"]
+
+        # Dynamic emergency: if they'd be empty in < ~6 ticks, treat as emergency.
+        emergency = (soc <= BASE_EMERGENCY_SOC *
+                     risk_aversion) or (ticks_to_empty <= 6.0 * risk_aversion)
+
+        # Dynamic low thresholds
+        low_soc = min(0.45, BASE_LOW_SOC * risk_aversion)
+        preventive_soc = min(0.55, BASE_PREVENTIVE_SOC * risk_aversion)
 
         # ---------- A) At-station logic ----------
         if is_at_station_chargeable(c, station_ids):
@@ -452,59 +448,57 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
             avail = int(meta.get("avail") or 0)
             total = int(meta.get("total") or 0)
             green_factor = float(meta.get("greenFactor") or 0.5)
-            price_factor = float(meta.get("priceFactor") or 0.5)
 
             queue_len = queue_by_station.get(sid, 0)
             utilization = 0.0
             if total > 0:
                 utilization = (total - avail) / total
 
-            # High congestion if almost all stalls used AND some waiting
-            high_congestion = (utilization > 0.8) or (
-                queue_len >= max(1, total))
+            high_congestion = (utilization > 0.82) or (
+                queue_len >= max(2, total))
 
             can_start = (avail > 0) or (state == "Charging")
             if not can_start:
+                # No available stall and not already charging
                 continue
 
             target = None
 
-            # (1) Emergency: charge regardless of congestion.
             if emergency:
                 base = 0.93 if speed >= FAST_KW_THRESHOLD else 0.90
-                base += 0.04 * (green_factor - 0.5)
+                base += 0.05 * (green_factor - 0.5)
+                base += bias["target_boost"]
+                base -= bias["target_cut"]
                 target = max(0.60, min(MAX_TARGET, base))
 
-            # (2) First-ever charge: we really want this, even if somewhat congested.
-            elif not has_charged and soc <= FIRST_CHARGE_MAX_SOC:
+            elif not has_charged:
+                # First charge: very important for completion.
+                # Even under moderate congestion we still go for it.
                 target = choose_target_soc(
                     speed_kw=speed,
-                    current_soc=soc,
+                    soc=soc,
                     first_charge=True,
-                    persona=persona,
+                    persona_bias=bias,
                     green_factor=green_factor,
-                    price_factor=price_factor,
                 )
 
-            # (3) Preventive charging when at station:
             else:
-                # If it's quite green and not too congested, allow top-ups up to ~0.45.
-                if green_factor >= 0.4 and not high_congestion:
-                    cond_ok = soc <= PREVENTIVE_AT_STATION
+                # Not first charge, not emergency.
+                # If it's green and not too congested, allow preventive top-ups.
+                if green_factor >= 0.45 and not high_congestion:
+                    cond_ok = soc <= preventive_soc
                 else:
-                    # At night / not green / congested → only charge when quite low.
-                    cond_ok = soc <= LOW_SOC
+                    cond_ok = soc <= low_soc
 
                 if cond_ok:
                     # Respect cooldown: if we recently charged them to a higher level, skip.
                     if not (cooldown_soc > 0.0 and soc >= cooldown_soc - 0.03):
                         target = choose_target_soc(
                             speed_kw=speed,
-                            current_soc=soc,
+                            soc=soc,
                             first_charge=False,
-                            persona=persona,
+                            persona_bias=bias,
                             green_factor=green_factor,
-                            price_factor=price_factor,
                         )
 
             if target is not None:
@@ -516,9 +510,8 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
                         "chargeTo": target
                     }]
                 })
-
                 _HAS_CHARGED[cid] = True
-                # Cooldown: require SoC to drop ~10 points below last target
+                # Require them to drop ~10 pts before we charge again
                 _RECENT_CHARGE_UNTIL[cid] = max(0.65, target - 0.10)
                 continue
 
@@ -537,51 +530,47 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
             speed = float(meta.get("speed") or 0.0)
             total = int(meta.get("total") or 0)
             green_factor = float(meta.get("greenFactor") or 0.5)
-            price_factor = float(meta.get("priceFactor") or 0.5)
 
             queue_len = queue_by_station.get(sid, 0)
             utilization = 0.0
             if total > 0:
                 utilization = (total - avail) / total
-            high_congestion = (utilization > 0.8) or (
-                queue_len >= max(1, total))
+            high_congestion = (utilization > 0.82) or (
+                queue_len >= max(2, total))
 
-            if avail <= 0 and not emergency:
-                # If we're not in emergency, don't route more cars to a full station.
+            # For non-emergency cars, don't route more to a totally full/highly congested station.
+            if avail <= 0 and not emergency and high_congestion:
                 continue
 
             target = None
 
-            # (1) Emergency: they are arriving very low → definitely charge.
             if emergency:
                 base = 0.93 if speed >= FAST_KW_THRESHOLD else 0.90
-                base += 0.04 * (green_factor - 0.5)
+                base += 0.05 * (green_factor - 0.5)
+                base += bias["target_boost"]
+                base -= bias["target_cut"]
                 target = max(0.60, min(MAX_TARGET, base))
 
-            # (2) First-ever charge on arrival:
-            elif not has_charged and soc <= FIRST_CHARGE_MAX_SOC:
-                # If congestion is very high and SoC is still decent, we might skip,
-                # but generally we want that first charge:
-                if not (high_congestion and soc > LOW_SOC):
+            elif not has_charged:
+                # First charge at arrival, unless congestion is extreme and SoC is still decent
+                if not (high_congestion and soc > low_soc):
                     target = choose_target_soc(
                         speed_kw=speed,
-                        current_soc=soc,
+                        soc=soc,
                         first_charge=True,
-                        persona=persona,
+                        persona_bias=bias,
                         green_factor=green_factor,
-                        price_factor=price_factor,
                     )
 
-            # (3) Preventive: they are a bit low and station is not too congested.
-            elif soc <= LOW_SOC and not high_congestion:
+            elif soc <= low_soc and not high_congestion:
+                # Preventive top-up on arrival if not heavily congested
                 if not (cooldown_soc > 0.0 and soc >= cooldown_soc - 0.03):
                     target = choose_target_soc(
                         speed_kw=speed,
-                        current_soc=soc,
+                        soc=soc,
                         first_charge=False,
-                        persona=persona,
+                        persona_bias=bias,
                         green_factor=green_factor,
-                        price_factor=price_factor,
                     )
 
             if target is not None:
@@ -593,30 +582,28 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
                         "chargeTo": target
                     }]
                 })
-
                 _HAS_CHARGED[cid] = True
                 _RECENT_CHARGE_UNTIL[cid] = max(0.65, target - 0.10)
 
     return recs
 
-
-# === ADAPTERS TO MATCH YOUR MAIN() ==================================================
+# ============================================================
+# ADAPTERS FOR YOUR MAIN()
+# ============================================================
 
 
 def should_move_on_to_next_tick(game_response):
     """
     Compute recommendations based on the logs present in this game_response,
-    and stash them so generate_tick(...) can attach them to the NEXT tick object.
-    Return True to move on.
+    stash them so generate_tick(...) can attach them to the NEXT tick object.
     """
     global _PENDING_RECS_FOR_NEXT_TICK
 
-    # Latest map -> dynamic station availability
     updated_map = game_response.get("map", {}) or {}
     node_index, station_ids, station_meta = build_node_and_station_indexes(
         updated_map)
 
-    # Determine the current tick seen in logs (max tick)
+    # Determine current tick (max tick in logs)
     logs = game_response.get("customerLogs", []) or []
     current_tick = -1
     for entry in logs:
@@ -625,9 +612,8 @@ def should_move_on_to_next_tick(game_response):
             if isinstance(t, (int, float)) and t > current_tick:
                 current_tick = t
     if current_tick < 0:
-        current_tick = 0  # fallback
+        current_tick = 0
 
-    # Inject dynamic environment info (time-of-day, weather) into station_meta
     augment_station_meta_with_environment(
         game_response, current_tick, station_meta)
 
@@ -641,99 +627,157 @@ def should_move_on_to_next_tick(game_response):
     if recs:
         print("→ Applying recommendations:",
               json.dumps(recs, indent=2))
-    _PENDING_RECS_FOR_NEXT_TICK = recs  # consumed by next generate_tick(...)
+
+    _PENDING_RECS_FOR_NEXT_TICK = recs
     return True
 
 
 def generate_tick(map_obj, tick_no):
-    """
-    Build the tick object the way your main() expects.
-    It attaches the recommendations computed in the LAST call to should_move_on_to_next_tick(...).
-    """
     global _PENDING_RECS_FOR_NEXT_TICK
     recs = _PENDING_RECS_FOR_NEXT_TICK or []
     tick = {
         "tick": tick_no,
         "customerRecommendations": recs
     }
-    # Clear after consuming so we don't resend same recs twice
     _PENDING_RECS_FOR_NEXT_TICK = []
     return tick
 
 
-def main():
-    api_key = "e32ec928-ac93-466b-8cd5-ac151ef5f7fe"
-    base_url = "http://localhost:8080"
-    # base_url = "https://api.considition.com/api/"
-    # map_name = "Turbohill"
-    # map_name = "Clutchfield"
-    # map_name = "Batterytown"
-    map_name = "Thunderroad"
+"<------------------------------------------------------------------------------------>"
 
-    client = ConsiditionClient(base_url, api_key)
+
+IS_LOCAL = base_url.startswith("http://localhost")
+
+
+def run_local_and_collect_ticks(map_name: str):
+    """
+    Run the whole game on the LOCAL docker engine using playToTick,
+    while collecting every tick object (with recommendations) in a list.
+
+    Returns:
+        all_ticks:   [tick0, tick1, ..., tickN]
+        final_score: the score from the last local response
+    """
+    local_base_url = "http://localhost:8080"
+    client = ConsiditionClient(local_base_url, api_key)
 
     try:
         map_obj = client.get_map(map_name)
     except Exception as e:
-        print(f"Failed to fetch map: {e}")
+        print(f"Failed to fetch map from local engine: {e}")
         sys.exit(1)
 
     if not map_obj:
-        print("Failed to fetch map!")
+        print("Failed to fetch local map!")
         sys.exit(1)
+
+    total_ticks = int(map_obj.get("ticks", 0))
+    print(f"Local map has {total_ticks} ticks")
 
     final_score = 0
     good_ticks = []
+    all_ticks = []
 
+    # First tick: no logs yet, just an empty recommendation set
     current_tick = generate_tick(map_obj, 0)
+    all_ticks.append(current_tick)
+
     input_payload = {
         "mapName": map_name,
         "ticks": [current_tick],
+        "playToTick": 0,
     }
 
-    total_ticks = int(map_obj.get("ticks", 0))
-
-    max_dev_ticks = 100
-
-    for i in range(max_dev_ticks):
+    max_dev_ticks = 80
+    for i in range(total_ticks):
         while True:
-            print(f"Playing tick: {i}")
+            print(f"[LOCAL] Playing tick: {i}")
             start = time.perf_counter()
             try:
                 game_response = client.post_game(input_payload)
             except Exception as e:
-                print(f"Error posting game data: {e}")
+                print(f"Error posting local game data: {e}")
                 sys.exit(1)
             elapsed_ms = (time.perf_counter() - start) * 1000
-            print(f"Tick {i} took: {elapsed_ms:.2f}ms")
+            print(f"[LOCAL] Tick {i} took: {elapsed_ms:.2f}ms")
 
             if not game_response:
-                print("Got no game response")
+                print("Got no local game response")
                 sys.exit(1)
 
-            # Sum the scores directly (assuming they are numbers)
+            # Local score (for debugging only)
             final_score = game_response.get("score", 0)
 
             if should_move_on_to_next_tick(game_response):
                 good_ticks.append(current_tick)
                 updated_map = game_response.get("map", map_obj) or map_obj
                 current_tick = generate_tick(updated_map, i + 1)
+                all_ticks.append(current_tick)
+
                 input_payload = {
                     "mapName": map_name,
-                    "playToTick": i + 1,
                     "ticks": [*good_ticks, current_tick],
+                    "playToTick": i + 1,
                 }
                 break
 
+            # If we ever decide NOT to move on (you always return True today),
+            # we would update with the same tick index i.
             updated_map = game_response.get("map", map_obj) or map_obj
             current_tick = generate_tick(updated_map, i)
+            all_ticks.append(current_tick)
+
             input_payload = {
                 "mapName": map_name,
-                "playToTick": i,
                 "ticks": [*good_ticks, current_tick],
+                "playToTick": i,
             }
 
-    print(f"Final score: {final_score}")
+    print(f"[LOCAL] Final local dev score: {final_score}")
+    return all_ticks, final_score
+
+
+def submit_ticks_to_cloud(map_name: str, all_ticks):
+    """
+    Submit the full tick sequence in ONE batch to the cloud API.
+    No playToTick here, just the deterministic replay.
+    """
+    cloud_base_url = "https://api.considition.com/"
+    client = ConsiditionClient(cloud_base_url, api_key)
+
+    payload = {
+        "mapName": map_name,
+        "ticks": all_ticks,
+    }
+
+    print(f"[CLOUD] Submitting {len(all_ticks)} ticks in one batch...")
+    start = time.perf_counter()
+    try:
+        game_response = client.post_game(payload)
+    except Exception as e:
+        print(f"Error posting to cloud API: {e}")
+        sys.exit(1)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    print(f"[CLOUD] Submission took: {elapsed_ms:.2f}ms")
+
+    if not game_response:
+        print("[CLOUD] Got no response from cloud")
+        sys.exit(1)
+
+    print("[CLOUD] Response keys:", list(game_response.keys()))
+    cloud_score = game_response.get("score", 0)
+    print(f"[CLOUD] Final cloud score: {cloud_score}")
+    return cloud_score
+
+
+def main():
+
+    # 1) Run locally on docker, using playToTick, and collect all ticks.
+    all_ticks, local_score = run_local_and_collect_ticks(map_name)
+    print(f"Local dev score (for your eyes only): {local_score}")
+
+    # 2) Submit the SAME tick sequence in one batch to the cloud.
+    submit_ticks_to_cloud(map_name, all_ticks)
 
 
 if __name__ == "__main__":

@@ -12,3 +12,8 @@ git stash pop
 git pull
 
 Hello
+
+
+
+
+curl -s -H "x-api-key: e32ec928-ac93-466b-8cd5-ac151ef5f7fe" \  https://api.considition.com/api/teams/games | jq .
