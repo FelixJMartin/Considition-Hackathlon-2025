@@ -336,3 +336,191 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    CRITICAL_SOC = 0.12
+    FULL_SOC = 0.9
+    FAST_KW = 180.0
+    N_SAMPLES = 30
+    HORIZON_TICKS = 200
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 1.0
+    W_CHARGE = 0.15
+    base_candidates = [0.7, 0.8, 0.9, 1.0]
+  "Score": 4580,
+  "KwhRevenue": 3562,
+  "CustomerCompletionScore": 1018
+
+
+
+
+    CRITICAL_SOC = 0.12
+    FULL_SOC = 0.9
+    FAST_KW = 180.0
+    N_SAMPLES = 50
+    HORIZON_TICKS = 200
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 1.0
+    W_CHARGE = 0.15
+    base_candidates = [0.7, 0.8, 0.9, 1.0]
+  "Score": 4477,
+  "KwhRevenue": 3459,
+  "CustomerCompletionScore": 1018
+
+
+
+    CRITICAL_SOC = 0.12
+    FULL_SOC = 0.9
+    FAST_KW = 180.0
+    N_SAMPLES = 5
+    HORIZON_TICKS = 200
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 1.0
+    W_CHARGE = 0.15
+    base_candidates = [0.7, 0.8, 0.9, 1.0]
+  "Score": 4700,
+  "KwhRevenue": 3586,
+  "CustomerCompletionScore": 1114
+
+
+
+    CRITICAL_SOC = 0.3
+    FULL_SOC = 0.9
+    FAST_KW = 180.0
+    N_SAMPLES = 5
+    HORIZON_TICKS = 200
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 1.0
+    W_CHARGE = 0.15
+    base_candidates = [0.7, 0.8, 0.9, 1.0]
+  "Score": 4962,
+  "KwhRevenue": 3965,
+  "CustomerCompletionScore": 997
+
+
+
+
+    CRITICAL_SOC = 0.3
+    FULL_SOC = 0.8
+    FAST_KW = 180.0
+    N_SAMPLES = 5
+    HORIZON_TICKS = 200
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 1.0
+    W_CHARGE = 0.15
+    base_candidates = [0.7, 0.8, 0.9, 1.0]
+  "Score": 5166,
+  "KwhRevenue": 3869,
+  "CustomerCompletionScore": 1297
+
+
+    CRITICAL_SOC = 0.3
+    FULL_SOC = 0.8
+    FAST_KW = 180.0
+    N_SAMPLES = 5
+    HORIZON_TICKS = 500
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 1.0
+    W_CHARGE = 0.15
+    base_candidates = [0.7, 0.8, 0.9, 1.0]
+  "Score": 5916,
+  "KwhRevenue": 4536,
+  "CustomerCompletionScore": 1380
+
+
+    CRITICAL_SOC = 0.3
+    FULL_SOC = 0.8
+    FAST_KW = 180.0
+    N_SAMPLES = 1
+    HORIZON_TICKS = 2000
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 1.0
+    W_CHARGE = 0.15
+    base_candidates = [0.7, 0.8, 0.9, 1.0]
+  "Score": 5916,
+  "KwhRevenue": 4536,
+  "CustomerCompletionScore": 1380
+
+
+    CRITICAL_SOC = 0.3
+    FULL_SOC = 0.8
+    FAST_KW = 180.0
+    N_SAMPLES = 20
+    HORIZON_TICKS = 400
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 1.0
+    W_CHARGE = 0.15
+    base_candidates = [0.7, 0.8, 0.9, 1.0]
+  "Score": 5916,
+  "KwhRevenue": 4536,
+  "CustomerCompletionScore": 1380
+
+
+    CRITICAL_SOC = 0.3
+    FULL_SOC = 0.8
+    FAST_KW = 180.0
+    N_SAMPLES = 40
+    HORIZON_TICKS = 400
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 1.0
+    W_CHARGE = 0.15
+    base_candidates = [0.7, 0.8, 0.9, 1.0]
+  "Score": 5934,
+  "KwhRevenue": 4554,
+  "CustomerCompletionScore": 1380
+
+
+    CRITICAL_SOC = 0.3
+    FULL_SOC = 0.8
+    FAST_KW = 180.0
+    N_SAMPLES = 40
+    HORIZON_TICKS = 400
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 2
+    W_CHARGE = 10
+    base_candidates = [0.7, 0.8, 0.9, 1.0]
+  "Score": 5916,
+  "KwhRevenue": 4536,
+  "CustomerCompletionScore": 1380
+
+
+    CRITICAL_SOC = 0.3
+    FULL_SOC = 0.8
+    FAST_KW = 180.0
+    N_SAMPLES = 40
+    HORIZON_TICKS = 400
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 2
+    W_CHARGE = 10
+    base_candidates = [0.3, 0.35, 0.4, 0.45]
+  "Score": 5934,
+  "KwhRevenue": 4554,
+  "CustomerCompletionScore": 1380
+
+
+    CRITICAL_SOC = 0.4
+    FULL_SOC = 0.7
+    FAST_KW = 180.0
+    N_SAMPLES = 40
+    HORIZON_TICKS = 400
+    CONS_MIN = 0.0008
+    CONS_MAX = 0.0025
+    W_DRIVE = 2
+    W_CHARGE = 10
+    base_candidates = [0.3, 0.35, 0.4, 0.45]
+    "Score": 5051,
+    "KwhRevenue": 3235,
+    "CustomerCompletionScore": 1816
+
+
+

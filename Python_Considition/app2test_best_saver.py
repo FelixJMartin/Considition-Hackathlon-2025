@@ -733,20 +733,6 @@ def main():
                 "ticks": [*good_ticks, current_tick],
             }
 
-    # ---------- NEW: save final game response to JSON file ----------
-    if game_response is not None:
-        filename = f"game_response_{map_name}_{int(time.time())}.json"
-        try:
-            with open(filename, "w", encoding="utf-8") as f:
-                json.dump(game_response, f, indent=2)
-            print(f"\nSaved final game response to: {filename}")
-            print("You can now upload this file to the Considition visualizer.")
-        except Exception as e:
-            print(f"Failed to save game response JSON: {e}")
-    else:
-        print("No game_response to save (something went wrong earlier).")
-    # ---------------------------------------------------------------
-
     print(f"Final score: {final_score}")
 
 
