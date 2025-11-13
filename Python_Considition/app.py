@@ -12,8 +12,8 @@ api_key = "e32ec928-ac93-466b-8cd5-ac151ef5f7fe"
 base_url = "https://api.considition.com/"
 # map_name = "Turbohill"
 # map_name = "Clutchfield"
-map_name = "Batterytown"
-# map_name = "Thunderroad"
+# map_name = "Batterytown"
+map_name = "Thunderroad"
 
 # --- Internal caches (used across ticks) --------------------
 
@@ -342,30 +342,29 @@ def _persona_biases(persona: str):
 
 def generate_customer_recommendations(customers_this_tick, station_ids, station_meta):
     """
-    Map-agnostic strategy:
+    Ultra completion-focused baseline, meant to be map-robust.
 
-    - Use per-car consumption estimate to set dynamic emergency/low thresholds.
-    - Guarantee at least one strong first charge for each car.
-    - Avoid re-topups above a per-car cooldown threshold.
-    - Avoid sending non-urgent cars into heavy congestion.
-    - Bias targets by persona and greenFactor.
+    Strategy:
+      - First time a car sees ANY station: charge hard to ~0.9, regardless of SoC.
+      - After that, only charge again when SoC is low, with strong emergency behavior.
+      - Avoid sending non-emergency cars into heavily congested stations when possible.
+      - Keep per-car cooldown to stop silly re-topups.
     """
     recs = []
 
-    # Base thresholds
-    BASE_EMERGENCY_SOC = 0.18
-    BASE_LOW_SOC = 0.30
-    BASE_PREVENTIVE_SOC = 0.48
-    MAX_TARGET = 0.94
+    # **Very conservative thresholds**
+    EMERGENCY_SOC = 0.30   # below this, we panic
+    LOW_SOC = 0.45         # below this, we prefer charging
+    MAX_TARGET = 0.94      # upper bound
 
     FAST_KW_THRESHOLD = 150.0
 
-    FIRST_FAST_TARGET = 0.90
-    FIRST_SLOW_TARGET = 0.86
-    NORMAL_FAST_TARGET = 0.84
-    NORMAL_SLOW_TARGET = 0.80
+    FIRST_FAST_TARGET = 0.92
+    FIRST_SLOW_TARGET = 0.90
+    NORMAL_FAST_TARGET = 0.86
+    NORMAL_SLOW_TARGET = 0.82
 
-    # --- Queue estimation ----------------------------------------------------
+    # --- Queue estimation: how many are currently Charging/Waiting per station -----
     queue_by_station = {}
     for c in customers_this_tick:
         node = c.get("node")
@@ -374,26 +373,19 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
             if state in {"Charging", "Waiting"}:
                 queue_by_station[node] = queue_by_station.get(node, 0) + 1
 
-    def choose_target_soc(speed_kw, soc, first_charge, persona_bias, green_factor):
-        if first_charge:
-            base = FIRST_FAST_TARGET if speed_kw >= FAST_KW_THRESHOLD else FIRST_SLOW_TARGET
-        else:
-            base = NORMAL_FAST_TARGET if speed_kw >= FAST_KW_THRESHOLD else NORMAL_SLOW_TARGET
+    def choose_target_first(speed_kw: float) -> float:
+        base = FIRST_FAST_TARGET if speed_kw >= FAST_KW_THRESHOLD else FIRST_SLOW_TARGET
+        return max(0.75, min(MAX_TARGET, base))
 
-        # Prefer higher targets when green
-        base += 0.05 * (green_factor - 0.5)
+    def choose_target_topup(speed_kw: float, soc: float) -> float:
+        base = NORMAL_FAST_TARGET if speed_kw >= FAST_KW_THRESHOLD else NORMAL_SLOW_TARGET
+        # Ensure we gain at least 15 percentage points
+        target = max(base, soc + 0.15)
+        return max(0.70, min(MAX_TARGET, target))
 
-        # Persona tweaks
-        base += persona_bias["target_boost"]
-        base -= persona_bias["target_cut"]
-
-        # Always gain at least 12 percentage points when we decide to charge
-        target = max(base, soc + 0.12)
-        return max(0.60, min(MAX_TARGET, target))
-
-    def stagger_target(cid, target):
+    def stagger_target(cid: str, target: float) -> float:
         h = hash(cid) % 7  # 0..6
-        delta = (h - 3) * 0.01
+        delta = (h - 3) * 0.01  # -0.03 .. +0.03
         t = target + delta
         return max(0.60, min(MAX_TARGET, t))
 
@@ -407,32 +399,10 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
         except Exception:
             soc = 0.0
 
-        persona = c.get("persona") or ""
-        bias = _persona_biases(persona)
-
         has_charged = _HAS_CHARGED.get(cid, False)
         cooldown_soc = float(_RECENT_CHARGE_UNTIL.get(cid, 0.0) or 0.0)
 
-        car_state = _CAR_STATE.get(cid, {})
-        est_cons = car_state.get("est_cons_per_tick") or 0.0
-
-        # Use consumption estimate to adapt thresholds:
-        # if they burn quickly, behave more risk-averse.
-        # Heuristic: "ticks to empty" ~ soc / cons
-        if est_cons > 1e-5:
-            ticks_to_empty = soc / est_cons
-        else:
-            ticks_to_empty = 999.0
-
-        risk_aversion = bias["risk_aversion"]
-
-        # Dynamic emergency: if they'd be empty in < ~6 ticks, treat as emergency.
-        emergency = (soc <= BASE_EMERGENCY_SOC *
-                     risk_aversion) or (ticks_to_empty <= 6.0 * risk_aversion)
-
-        # Dynamic low thresholds
-        low_soc = min(0.45, BASE_LOW_SOC * risk_aversion)
-        preventive_soc = min(0.55, BASE_PREVENTIVE_SOC * risk_aversion)
+        emergency = soc <= EMERGENCY_SOC
 
         # ---------- A) At-station logic ----------
         if is_at_station_chargeable(c, station_ids):
@@ -447,59 +417,41 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
             speed = float(meta.get("speed") or 0.0)
             avail = int(meta.get("avail") or 0)
             total = int(meta.get("total") or 0)
-            green_factor = float(meta.get("greenFactor") or 0.5)
 
             queue_len = queue_by_station.get(sid, 0)
             utilization = 0.0
             if total > 0:
                 utilization = (total - avail) / total
 
-            high_congestion = (utilization > 0.82) or (
+            # heavy congestion if almost all stalls used AND queue ≥ total
+            high_congestion = (utilization > 0.85) or (
                 queue_len >= max(2, total))
 
             can_start = (avail > 0) or (state == "Charging")
-            if not can_start:
-                # No available stall and not already charging
+            if not can_start and not emergency:
+                # No free stall and not already charging, skip unless emergency
                 continue
 
             target = None
 
             if emergency:
-                base = 0.93 if speed >= FAST_KW_THRESHOLD else 0.90
-                base += 0.05 * (green_factor - 0.5)
-                base += bias["target_boost"]
-                base -= bias["target_cut"]
-                target = max(0.60, min(MAX_TARGET, base))
+                # In emergency, charge aggressively regardless of congestion
+                target = choose_target_topup(speed, soc)
 
             elif not has_charged:
-                # First charge: very important for completion.
-                # Even under moderate congestion we still go for it.
-                target = choose_target_soc(
-                    speed_kw=speed,
-                    soc=soc,
-                    first_charge=True,
-                    persona_bias=bias,
-                    green_factor=green_factor,
-                )
+                # FIRST CHARGE: charge hard, even if somewhat congested.
+                target = choose_target_first(speed)
 
             else:
-                # Not first charge, not emergency.
-                # If it's green and not too congested, allow preventive top-ups.
-                if green_factor >= 0.45 and not high_congestion:
-                    cond_ok = soc <= preventive_soc
-                else:
-                    cond_ok = soc <= low_soc
-
-                if cond_ok:
-                    # Respect cooldown: if we recently charged them to a higher level, skip.
+                # Subsequent charges, only when clearly low
+                if soc <= LOW_SOC:
+                    # Avoid re-topup right after a previous full charge
                     if not (cooldown_soc > 0.0 and soc >= cooldown_soc - 0.03):
-                        target = choose_target_soc(
-                            speed_kw=speed,
-                            soc=soc,
-                            first_charge=False,
-                            persona_bias=bias,
-                            green_factor=green_factor,
-                        )
+                        # If station is totally slammed and this is non-emergency, consider skipping
+                        if high_congestion and not emergency:
+                            target = None
+                        else:
+                            target = choose_target_topup(speed, soc)
 
             if target is not None:
                 target = stagger_target(cid, target)
@@ -511,8 +463,7 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
                     }]
                 })
                 _HAS_CHARGED[cid] = True
-                # Require them to drop ~10 pts before we charge again
-                _RECENT_CHARGE_UNTIL[cid] = max(0.65, target - 0.10)
+                _RECENT_CHARGE_UNTIL[cid] = max(0.70, target - 0.12)
                 continue
 
         # ---------- B) Arriving-next-tick-to-station logic ----------
@@ -529,49 +480,31 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
             avail = int(meta.get("avail") or 0)
             speed = float(meta.get("speed") or 0.0)
             total = int(meta.get("total") or 0)
-            green_factor = float(meta.get("greenFactor") or 0.5)
 
             queue_len = queue_by_station.get(sid, 0)
             utilization = 0.0
             if total > 0:
                 utilization = (total - avail) / total
-            high_congestion = (utilization > 0.82) or (
+            high_congestion = (utilization > 0.85) or (
                 queue_len >= max(2, total))
 
-            # For non-emergency cars, don't route more to a totally full/highly congested station.
-            if avail <= 0 and not emergency and high_congestion:
+            # For non-emergency: avoid routing into a completely overloaded station
+            if avail <= 0 and high_congestion and not emergency:
                 continue
 
             target = None
 
             if emergency:
-                base = 0.93 if speed >= FAST_KW_THRESHOLD else 0.90
-                base += 0.05 * (green_factor - 0.5)
-                base += bias["target_boost"]
-                base -= bias["target_cut"]
-                target = max(0.60, min(MAX_TARGET, base))
+                target = choose_target_topup(speed, soc)
 
             elif not has_charged:
-                # First charge at arrival, unless congestion is extreme and SoC is still decent
-                if not (high_congestion and soc > low_soc):
-                    target = choose_target_soc(
-                        speed_kw=speed,
-                        soc=soc,
-                        first_charge=True,
-                        persona_bias=bias,
-                        green_factor=green_factor,
-                    )
+                # First charge on arrival: *always* take it unless station is totally insane
+                if not (high_congestion and soc > LOW_SOC):
+                    target = choose_target_first(speed)
 
-            elif soc <= low_soc and not high_congestion:
-                # Preventive top-up on arrival if not heavily congested
+            elif soc <= LOW_SOC and not high_congestion:
                 if not (cooldown_soc > 0.0 and soc >= cooldown_soc - 0.03):
-                    target = choose_target_soc(
-                        speed_kw=speed,
-                        soc=soc,
-                        first_charge=False,
-                        persona_bias=bias,
-                        green_factor=green_factor,
-                    )
+                    target = choose_target_topup(speed, soc)
 
             if target is not None:
                 target = stagger_target(cid, target)
@@ -583,9 +516,10 @@ def generate_customer_recommendations(customers_this_tick, station_ids, station_
                     }]
                 })
                 _HAS_CHARGED[cid] = True
-                _RECENT_CHARGE_UNTIL[cid] = max(0.65, target - 0.10)
+                _RECENT_CHARGE_UNTIL[cid] = max(0.70, target - 0.12)
 
     return recs
+
 
 # ============================================================
 # ADAPTERS FOR YOUR MAIN()
@@ -689,7 +623,7 @@ def run_local_and_collect_ticks(map_name: str):
     }
 
     max_dev_ticks = 80
-    for i in range(total_ticks):
+    for i in range(max_dev_ticks):
         while True:
             print(f"[LOCAL] Playing tick: {i}")
             start = time.perf_counter()
@@ -732,6 +666,46 @@ def run_local_and_collect_ticks(map_name: str):
                 "ticks": [*good_ticks, current_tick],
                 "playToTick": i,
             }
+
+        # === DIAGNOSTICS: FINAL STATE DISTRIBUTION AFTER LAST LOCAL RESPONSE ===
+    # game_response here is the one from the last loop iteration above.
+    final_logs = game_response.get("customerLogs", []) or []
+    done_states = {}
+    soc_values = []
+
+    for entry in final_logs:
+        cid = entry.get("customerId") or entry.get("id")
+        if not cid:
+            continue
+        best = None
+        for rec in entry.get("logs", []) or []:
+            t = rec.get("tick")
+            if t is None:
+                continue
+            if best is None or t > best.get("tick", -1):
+                best = rec
+        if best is None:
+            continue
+
+        state = (best.get("state") or "").strip()
+        soc = best.get("chargeRemaining")
+        try:
+            soc = float(soc)
+        except Exception:
+            soc = 0.0
+
+        done_states[state] = done_states.get(state, 0) + 1
+        soc_values.append(soc)
+
+    print("=== FINAL STATE DISTRIBUTION (LOCAL, DEV TICKS) ===")
+    for s, cnt in sorted(done_states.items(), key=lambda x: -x[1]):
+        print(f"{s}: {cnt}")
+    if soc_values:
+        avg_soc = sum(soc_values) / len(soc_values)
+        print(f"Avg final SoC: {avg_soc:.3f}")
+        print(f"Min final SoC: {min(soc_values):.3f}")
+        print(f"Max final SoC: {max(soc_values):.3f}")
+    # === END DIAGNOSTICS ===
 
     print(f"[LOCAL] Final local dev score: {final_score}")
     return all_ticks, final_score

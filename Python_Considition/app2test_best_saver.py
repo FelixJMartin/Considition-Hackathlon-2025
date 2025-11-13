@@ -8,10 +8,9 @@ from client import ConsiditionClient
 api_key = "e32ec928-ac93-466b-8cd5-ac151ef5f7fe"
 # base_url = "http://localhost:8080"
 base_url = "https://api.considition.com/"
-# map_name = "Turbohill"
-# map_name = "Clutchfield"
+
 map_name = "Batterytown"
-# map_name = "Thunderroad"
+
 
 # === Internal cache so the main() you provided works ===
 # Filled in should_move_on_to_next_tick(); consumed in generate_tick()
