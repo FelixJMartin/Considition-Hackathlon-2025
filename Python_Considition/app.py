@@ -8,12 +8,14 @@ from client import ConsiditionClient
 # ============================================================
 
 api_key = "e32ec928-ac93-466b-8cd5-ac151ef5f7fe"
-# base_url = "http://localhost:8080"
+# base_url = "http://localhost:8081"
 base_url = "https://api.considition.com/"
 # map_name = "Turbohill"
 # map_name = "Clutchfield"
 # map_name = "Batterytown"
-map_name = "Thunderroad"
+# map_name = "Thunderroad"
+map_name = "Pistonia"
+
 
 # --- Internal caches (used across ticks) --------------------
 
@@ -683,7 +685,7 @@ def run_local_and_collect_ticks(map_name: str):
         all_ticks:   [tick0, tick1, ..., tickN]
         final_score: the score from the last local response
     """
-    local_base_url = "http://localhost:8080"
+    local_base_url = "http://localhost:8081"
     client = ConsiditionClient(local_base_url, api_key)
 
     try:
