@@ -1,6 +1,6 @@
 # Considition 2025 — Summary
 
-A brief overview of my participation in **Considition 2025**, the annual programming and AI hackathon organized by **Consid** in collaboration with **Vattenfall AB**.
+A brief overview of Alex and mine participation in **Considition 2025**, the annual programming and AI hackathon organized by **Consid** in collaboration with **Vattenfall AB**. We were a team of two tackling this challange during the timeline of one week. 
 
 ## About the Hackathon
 Considition is a large international coding competition with participants from more than 20 countries. In 2025, the challenge focused on developing AI-driven strategies for sustainable electric vehicle (EV) charging.
