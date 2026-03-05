@@ -5,21 +5,21 @@
 
 ---
 
-## 🔋 The Challenge
+##  The Challenge
 
 Develop an AI strategy to optimize electric vehicle charging across urban networks.
 
 **Objectives**:
-- ⚡ Maximize grid efficiency and renewable energy usage
-- 😊 Maintain customer satisfaction (minimize wait times, range anxiety)
-- 💰 Minimize costs (energy pricing, congestion)
-- 🌍 Prioritize green charging (solar/wind availability)
+-  Maximize grid efficiency and renewable energy usage
+-  Maintain customer satisfaction (minimize wait times, range anxiety)
+-  Minimize costs (energy pricing, congestion)
+-  Prioritize green charging (solar/wind availability)
 
 **Constraints**: Dynamic demand, limited capacity, real-time weather, time-varying pricing
 
 ---
 
-## 🧠 Our Solution
+##  Our Solution
 
 ### Three-Layer Strategy
 
@@ -42,7 +42,7 @@ if congestion > 90% and soc > emergency:
 
 ---
 
-## 📊 Key Features
+##  Key Features
 
 ### Dynamic Green Energy Scoring
 Weather + time-of-day → green factor (0.0–1.0)
@@ -76,7 +76,7 @@ Customers charged: 612/650 (94.2%)
 
 ---
 
-## 🛠️ Tech Stack
+##  Tech Stack
 
 **Python** | RESTful API | Event-driven tick simulation
 
@@ -88,7 +88,7 @@ Customers charged: 612/650 (94.2%)
 
 ---
 
-## 🌍 Real-World Impact
+##  Real-World Impact
 
 This addresses:
 - Smart city EV infrastructure planning
@@ -97,7 +97,7 @@ This addresses:
 
 ---
 
-## 🏆 Competition
+##  Competition
 
 **Considition 2025**: Annual AI hackathon by Consid + Vattenfall  
 **Focus**: Sustainable energy & smart cities  
